@@ -8,19 +8,25 @@ from streamlit_gsheets import GSheetsConnection
 st.set_page_config(page_title="Control de Producción As-Built (LPS)", layout="wide")
 st.title("🏗️ Control de Producción As-Built — Last Planner System")
 
-# --- CONEXIÓN A GOOGLE SHEETS ---
-URL_GOOGLE_SHEETS = "https://docs.google.com/spreadsheets/d/1zAseM8s_jkTo8YFjAL39SUAk15lNJs63-0WKDR7pbuI/edit?usp=sharing"
-
-conn = st.connection("gsheets", type=GSheetsConnection)
+# --- CONEXIÓN A GOOGLE SHEETS Y LIMPIEZA DE SECRETS ---
+try:
+    # Si la private_key tiene saltos de línea sin escapar, los corregimos
+    if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
+        pk = st.secrets["connections"]["gsheets"].get("private_key", "")
+        if "\\n" in pk:
+            st.secrets["connections"]["gsheets"]["private_key"] = pk.replace("\\n", "\n")
+            
+    conn = st.connection("gsheets", type=GSheetsConnection)
+except Exception as e:
+    st.error(f"Error en configuración de Secrets: {e}")
 
 def cargar_datos():
-    df_raw = conn.read(spreadsheet=URL_GOOGLE_SHEETS, ttl=0)
+    df_raw = conn.read(ttl=0)
     df_raw.columns = df_raw.columns.str.strip()
     df_raw['Inicio'] = pd.to_datetime(df_raw['Inicio']).dt.date
     df_raw['Días'] = pd.to_numeric(df_raw['Días'], errors='coerce').fillna(1).astype(int)
     return df_raw
 
-# Inicializar o recargar datos en Session State
 if "df_datos" not in st.session_state:
     try:
         st.session_state.df_datos = cargar_datos()
@@ -44,7 +50,6 @@ festivos_manuales = st.sidebar.multiselect(
     default=[datetime.date(2026, 8, 7)]
 )
 
-# Función de cálculo de Fecha Fin
 def calcular_fecha_fin(fecha_inicio, dias_estimados, festivos_no_lab):
     if pd.isna(fecha_inicio) or pd.isna(dias_estimados):
         return fecha_inicio
@@ -65,7 +70,6 @@ def calcular_fecha_fin(fecha_inicio, dias_estimados, festivos_no_lab):
             dias_sumados += 1
     return fecha_actual
 
-# Recalcular Fecha Fin antes de mostrar
 st.session_state.df_datos['Fecha Fin'] = st.session_state.df_datos.apply(
     lambda row: calcular_fecha_fin(row['Inicio'], row['Días'], festivos_manuales), axis=1
 )
@@ -89,13 +93,11 @@ df_editado = st.data_editor(
     }
 )
 
-# Actualizar el Session State con las ediciones realizadas por el usuario
 df_editado['Fecha Fin'] = df_editado.apply(
     lambda row: calcular_fecha_fin(row['Inicio'], row['Días'], festivos_manuales), axis=1
 )
 st.session_state.df_datos = df_editado
 
-# MOSTRAR TABLA RESUMEN CON FECHA FIN CALCULADA EN TIEMPO REAL
 with st.expander("👁️ Ver Fechas Finales Calculadas Dinámicamente", expanded=True):
     st.dataframe(
         df_editado[['Actividad', 'Inicio', 'Días', 'Fecha Fin', 'Estado']],
@@ -103,16 +105,17 @@ with st.expander("👁️ Ver Fechas Finales Calculadas Dinámicamente", expande
         hide_index=True
     )
 
-# BOTÓN DE GUARDADO
+# BOTÓN DE GUARDADO PERMANENTE
 col1, col2 = st.columns([1, 4])
 with col1:
     if st.button("💾 Guardar Cambios en la Nube"):
         try:
             df_para_guardar = df_editado[['Actividad', 'Responsable', 'Inicio', 'Días', 'Estado', 'Comentarios']]
-            conn.update(spreadsheet=URL_GOOGLE_SHEETS, data=df_para_guardar)
-            st.success("¡Datos sincronizados con éxito con Google Sheets!")
+            conn.update(data=df_para_guardar)
+            st.success("¡Datos guardados con éxito en Google Sheets!")
+            st.cache_data.clear()
         except Exception as err:
-            st.warning("⚠️ Guardado local en sesión completado. Para escribir en Google Sheets verifica los permisos de la API en Streamlit Secrets.")
+            st.error(f"Error al guardar los cambios: {err}")
 
 st.markdown("---")
 
