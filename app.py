@@ -8,27 +8,27 @@ from streamlit_gsheets import GSheetsConnection
 st.set_page_config(page_title="Control de Producción As-Built (LPS)", layout="wide")
 st.title("🏗️ Control de Producción As-Built — Last Planner System")
 
-# --- CONEXIÓN A GOOGLE SHEETS (BASE DE DATOS PERSISTENTE) ---
+# --- CONEXIÓN A GOOGLE SHEETS ---
 URL_GOOGLE_SHEETS = "https://docs.google.com/spreadsheets/d/1zAseM8s_jkTo8YFjAL39SUAk15lNJs63-0WKDR7pbuI/edit?usp=sharing"
 
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-@st.cache_data(ttl=5)
 def cargar_datos():
-    df_raw = conn.read(spreadsheet=URL_GOOGLE_SHEETS, ttl="5s")
-    # Limpiar espacios en nombres de columnas si existen
+    df_raw = conn.read(spreadsheet=URL_GOOGLE_SHEETS, ttl=0)
     df_raw.columns = df_raw.columns.str.strip()
-    # Convertir columna de inicio a tipo fecha
     df_raw['Inicio'] = pd.to_datetime(df_raw['Inicio']).dt.date
+    df_raw['Días'] = pd.to_numeric(df_raw['Días'], errors='coerce').fillna(1).astype(int)
     return df_raw
 
-try:
-    df = cargar_datos()
-except Exception as e:
-    st.error(f"Error al conectar con Google Sheets: {e}")
-    st.stop()
+# Inicializar o recargar datos en Session State
+if "df_datos" not in st.session_state:
+    try:
+        st.session_state.df_datos = cargar_datos()
+    except Exception as e:
+        st.error(f"Error al conectar con Google Sheets: {e}")
+        st.stop()
 
-# --- SECCIÓN 1: SELECTOR MANUAL DE FESTIVOS NO LABORABLES ---
+# --- SECCIÓN 1: SELECTOR MANUAL DE FESTIVOS ---
 st.sidebar.header("⚙️ Configuración de Calendario")
 festivos_manuales = st.sidebar.multiselect(
     "Selecciona los festivos que NO se trabajarán:",
@@ -44,12 +44,11 @@ festivos_manuales = st.sidebar.multiselect(
     default=[datetime.date(2026, 8, 7)]
 )
 
-# Función para calcular fecha fin excluyendo fines de semana y festivos
+# Función de cálculo de Fecha Fin
 def calcular_fecha_fin(fecha_inicio, dias_estimados, festivos_no_lab):
     if pd.isna(fecha_inicio) or pd.isna(dias_estimados):
         return fecha_inicio
     
-    # Asegurar formato datetime.date
     if isinstance(fecha_inicio, str):
         fecha_inicio = pd.to_datetime(fecha_inicio).date()
     elif isinstance(fecha_inicio, pd.Timestamp):
@@ -66,46 +65,54 @@ def calcular_fecha_fin(fecha_inicio, dias_estimados, festivos_no_lab):
             dias_sumados += 1
     return fecha_actual
 
-# Asignar una Fecha Fin inicial antes de mostrar en la tabla
-df['Fecha Fin'] = df.apply(lambda row: calcular_fecha_fin(row['Inicio'], row['Días'], festivos_manuales), axis=1)
+# Recalcular Fecha Fin antes de mostrar
+st.session_state.df_datos['Fecha Fin'] = st.session_state.df_datos.apply(
+    lambda row: calcular_fecha_fin(row['Inicio'], row['Días'], festivos_manuales), axis=1
+)
 
 # --- VISTA 1: TABLA EDITABLE ---
 st.subheader("📋 Registro de Actividades As-Built")
 
-# Desplegamos la tabla editable (sin permitir modificar Fecha Fin directamente, ya que se calcula)
 df_editado = st.data_editor(
-    df[['Actividad', 'Responsable', 'Inicio', 'Días', 'Fecha Fin', 'Estado', 'Comentarios']],
+    st.session_state.df_datos[['Actividad', 'Responsable', 'Inicio', 'Días', 'Estado', 'Comentarios']],
     use_container_width=True,
     num_rows="dynamic",
+    key="editor_tabla",
     column_config={
         "Estado": st.column_config.SelectboxColumn(
             "Estado del Compromiso",
-            help="Selecciona el estado actual de la actividad",
             options=["Pendiente", "En proceso", "Completado"],
             required=True
         ),
         "Inicio": st.column_config.DateColumn("Inicio", format="YYYY-MM-DD"),
-        "Fecha Fin": st.column_config.DateColumn("Fecha Fin (Calculada)", format="YYYY-MM-DD", disabled=True)
+        "Días": st.column_config.NumberColumn("Días Duración", min_value=1, step=1)
     }
 )
 
-# 🔥 RECALCULAR FECHA FIN EN TIEMPO REAL TRAS EDICIÓN DE ENTRADAS 🔥
+# Actualizar el Session State con las ediciones realizadas por el usuario
 df_editado['Fecha Fin'] = df_editado.apply(
     lambda row: calcular_fecha_fin(row['Inicio'], row['Días'], festivos_manuales), axis=1
 )
+st.session_state.df_datos = df_editado
 
-# BOTÓN PARA GUARDAR CAMBIOS PERMANENTES EN LA BASE DE DATOS
+# MOSTRAR TABLA RESUMEN CON FECHA FIN CALCULADA EN TIEMPO REAL
+with st.expander("👁️ Ver Fechas Finales Calculadas Dinámicamente", expanded=True):
+    st.dataframe(
+        df_editado[['Actividad', 'Inicio', 'Días', 'Fecha Fin', 'Estado']],
+        use_container_width=True,
+        hide_index=True
+    )
+
+# BOTÓN DE GUARDADO
 col1, col2 = st.columns([1, 4])
 with col1:
-    if st.button("💾 Guardar Cambios Permanentes"):
+    if st.button("💾 Guardar Cambios en la Nube"):
         try:
-            # Seleccionar solo las columnas origen para guardar en Google Sheets
             df_para_guardar = df_editado[['Actividad', 'Responsable', 'Inicio', 'Días', 'Estado', 'Comentarios']]
             conn.update(spreadsheet=URL_GOOGLE_SHEETS, data=df_para_guardar)
-            st.success("¡Datos guardados con éxito en la base de datos!")
-            st.cache_data.clear()
+            st.success("¡Datos sincronizados con éxito con Google Sheets!")
         except Exception as err:
-            st.error(f"Error al guardar los cambios: {err}")
+            st.warning("⚠️ Guardado local en sesión completado. Para escribir en Google Sheets verifica los permisos de la API en Streamlit Secrets.")
 
 st.markdown("---")
 
@@ -128,7 +135,7 @@ fig.update_layout(xaxis_title="Fecha", yaxis_title="Actividades", height=450)
 
 st.plotly_chart(fig, use_container_width=True)
 
-# --- SECCIÓN 3: CONEXIÓN REAL A SLACK ---
+# --- SECCIÓN 3: CONEXIÓN A SLACK ---
 st.markdown("---")
 slack_webhook_url = st.text_input("Ingresa tu Webhook URL de Slack (Opcional):", type="password")
 
