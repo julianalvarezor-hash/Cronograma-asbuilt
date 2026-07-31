@@ -2,10 +2,31 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import datetime
-import requests # Para enviar las notificaciones a Slack
+import requests
+from streamlit_gsheets import GSheetsConnection
 
 st.set_page_config(page_title="Control de Producción As-Built (LPS)", layout="wide")
 st.title("🏗️ Control de Producción As-Built — Last Planner System")
+
+# --- CONEXIÓN A GOOGLE SHEETS (BASE DE DATOS PERSISTENTE) ---
+URL_GOOGLE_SHEETS = "https://docs.google.com/spreadsheets/d/1zAseM8s_jkTo8YFjAL39SUAk15lNJs63-0WKDR7pbuI/edit?usp=sharing"
+
+conn = st.connection("gsheets", type=GSheetsConnection)
+
+@st.cache_data(ttl=5)
+def cargar_datos():
+    df_raw = conn.read(spreadsheet=URL_GOOGLE_SHEETS, ttl="5s")
+    # Limpiar espacios en nombres de columnas si existen
+    df_raw.columns = df_raw.columns.str.strip()
+    # Convertir columna de inicio a tipo fecha
+    df_raw['Inicio'] = pd.to_datetime(df_raw['Inicio']).dt.date
+    return df_raw
+
+try:
+    df = cargar_datos()
+except Exception as e:
+    st.error(f"Error al conectar con Google Sheets: {e}")
+    st.stop()
 
 # --- SECCIÓN 1: SELECTOR MANUAL DE FESTIVOS NO LABORABLES ---
 st.sidebar.header("⚙️ Configuración de Calendario")
@@ -20,38 +41,28 @@ festivos_manuales = st.sidebar.multiselect(
         datetime.date(2026, 12, 8),  # Inmaculada Concepción
         datetime.date(2026, 12, 25)  # Navidad
     ],
-    default=[datetime.date(2026, 8, 7)] # Opción por defecto
+    default=[datetime.date(2026, 8, 7)]
 )
 
 # Función de cálculo de fecha fin (Excluye Fines de Semana + Festivos Seleccionados)
 def calcular_fecha_fin(fecha_inicio, dias_estimados, festivos_no_lab):
+    if pd.isna(fecha_inicio) or pd.isna(dias_estimados):
+        return fecha_inicio
     fecha_actual = fecha_inicio
     dias_sumados = 0
-    while dias_sumados < dias_estimados:
+    while dias_sumados < int(dias_estimados):
         fecha_actual += datetime.timedelta(days=1)
-        es_fin_de_semana = fecha_actual.weekday() >= 5 # 5=Sábado, 6=Domingo
+        es_fin_de_semana = fecha_actual.weekday() >= 5
         es_festivo_no_laboral = fecha_actual in festivos_no_lab
         
         if not es_fin_de_semana and not es_festivo_no_laboral:
             dias_sumados += 1
     return fecha_actual
 
-# --- SECCIÓN 2: DATOS DE ACTIVIDADES ---
-datos_iniciales = [
-    {"Actividad": "Muros Exteriores", "Responsable": "Julian Alvarez", "Inicio": datetime.date(2026, 7, 31), "Días": 5, "Estado": "En proceso", "Comentarios": "Falta coordinación de planos"},
-    {"Actividad": "Muros Interiores", "Responsable": "Julian Alvarez", "Inicio": datetime.date(2026, 7, 31), "Días": 5, "Estado": "Pendiente", "Comentarios": ""},
-    {"Actividad": "Pisos", "Responsable": "Carlos Gómez", "Inicio": datetime.date(2026, 7, 31), "Días": 2, "Estado": "Pendiente", "Comentarios": "Revisión de cotas"},
-    {"Actividad": "Puertas", "Responsable": "Ana Martínez", "Inicio": datetime.date(2026, 8, 5), "Días": 4, "Estado": "En proceso", "Comentarios": ""},
-    {"Actividad": "Ventanas", "Responsable": "Ana Martínez", "Inicio": datetime.date(2026, 8, 10), "Días": 2, "Estado": "Completado", "Comentarios": ""},
-    {"Actividad": "Documentación y Planos", "Responsable": "Julian Alvarez", "Inicio": datetime.date(2026, 8, 12), "Días": 4, "Estado": "Pendiente", "Comentarios": "Ajustes finales de obra"}
-]
-
-df = pd.DataFrame(datos_iniciales)
-
-# Cálculo dinámico usando la lista de festivos manuales
+# Cálculo dinámico de Fecha Fin
 df['Fecha Fin'] = df.apply(lambda row: calcular_fecha_fin(row['Inicio'], row['Días'], festivos_manuales), axis=1)
 
-# --- VISTA 1: TABLA EDITABLE CON LISTA DESPLEGABLE ---
+# --- VISTA 1: TABLA EDITABLE ---
 st.subheader("📋 Registro de Actividades As-Built")
 
 df_editado = st.data_editor(
@@ -62,15 +73,25 @@ df_editado = st.data_editor(
         "Estado": st.column_config.SelectboxColumn(
             "Estado del Compromiso",
             help="Selecciona el estado actual de la actividad",
-            options=[
-                "Pendiente",
-                "En proceso",
-                "Completado"
-            ],
+            options=["Pendiente", "En proceso", "Completado"],
             required=True
-        )
+        ),
+        "Inicio": st.column_config.DateColumn("Inicio", format="YYYY-MM-DD")
     }
 )
+
+# BOTÓN PARA GUARDAR CAMBIOS PERMANENTES EN LA BASE DE DATOS
+col1, col2 = st.columns([1, 4])
+with col1:
+    if st.button("💾 Guardar Cambios Permanentes"):
+        try:
+            # Seleccionar columnas originales para guardar
+            df_para_guardar = df_editado[['Actividad', 'Responsable', 'Inicio', 'Días', 'Estado', 'Comentarios']]
+            conn.update(spreadsheet=URL_GOOGLE_SHEETS, data=df_para_guardar)
+            st.success("¡Datos guardados con éxito en la base de datos!")
+            st.cache_data.clear()
+        except Exception as err:
+            st.error(f"Error al guardar los cambios: {err}")
 
 st.markdown("---")
 
