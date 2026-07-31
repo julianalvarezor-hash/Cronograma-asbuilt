@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import datetime
-import requests # Para enviar los mensajes a Slack
+import requests # Para enviar las notificaciones a Slack
 
 st.set_page_config(page_title="Control de Producción As-Built (LPS)", layout="wide")
 st.title("🏗️ Control de Producción As-Built — Last Planner System")
@@ -20,7 +20,7 @@ festivos_manuales = st.sidebar.multiselect(
         datetime.date(2026, 12, 8),  # Inmaculada Concepción
         datetime.date(2026, 12, 25)  # Navidad
     ],
-    default=[datetime.date(2026, 8, 7)] # Puedes marcar los que apliquen por defecto
+    default=[datetime.date(2026, 8, 7)] # Opción por defecto
 )
 
 # Función de cálculo de fecha fin (Excluye Fines de Semana + Festivos Seleccionados)
@@ -51,17 +51,30 @@ df = pd.DataFrame(datos_iniciales)
 # Cálculo dinámico usando la lista de festivos manuales
 df['Fecha Fin'] = df.apply(lambda row: calcular_fecha_fin(row['Inicio'], row['Días'], festivos_manuales), axis=1)
 
-# --- VISTA 1: TABLA EDITABLE ---
+# --- VISTA 1: TABLA EDITABLE CON LISTA DESPLEGABLE ---
 st.subheader("📋 Registro de Actividades As-Built")
+
 df_editado = st.data_editor(
     df[['Actividad', 'Responsable', 'Inicio', 'Días', 'Fecha Fin', 'Estado', 'Comentarios']],
     use_container_width=True,
-    num_rows="dynamic"
+    num_rows="dynamic",
+    column_config={
+        "Estado": st.column_config.SelectboxColumn(
+            "Estado del Compromiso",
+            help="Selecciona el estado actual de la actividad",
+            options=[
+                "Pendiente",
+                "En proceso",
+                "Completado"
+            ],
+            required=True
+        )
+    }
 )
 
 st.markdown("---")
 
-# --- VISTA 2: GANTT / LÍNEA DE TIEMPO ---
+# --- VISTA 2: GANTT / LÍNEA DE TIEMPO INTERACTIVA ---
 st.subheader("📅 Cronograma y Línea de Tiempo Interactiva")
 
 fig = px.timeline(
