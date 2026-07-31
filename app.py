@@ -44,10 +44,17 @@ festivos_manuales = st.sidebar.multiselect(
     default=[datetime.date(2026, 8, 7)]
 )
 
-# Función de cálculo de fecha fin (Excluye Fines de Semana + Festivos Seleccionados)
+# Función para calcular fecha fin excluyendo fines de semana y festivos
 def calcular_fecha_fin(fecha_inicio, dias_estimados, festivos_no_lab):
     if pd.isna(fecha_inicio) or pd.isna(dias_estimados):
         return fecha_inicio
+    
+    # Asegurar formato datetime.date
+    if isinstance(fecha_inicio, str):
+        fecha_inicio = pd.to_datetime(fecha_inicio).date()
+    elif isinstance(fecha_inicio, pd.Timestamp):
+        fecha_inicio = fecha_inicio.date()
+        
     fecha_actual = fecha_inicio
     dias_sumados = 0
     while dias_sumados < int(dias_estimados):
@@ -59,12 +66,13 @@ def calcular_fecha_fin(fecha_inicio, dias_estimados, festivos_no_lab):
             dias_sumados += 1
     return fecha_actual
 
-# Cálculo dinámico de Fecha Fin
+# Asignar una Fecha Fin inicial antes de mostrar en la tabla
 df['Fecha Fin'] = df.apply(lambda row: calcular_fecha_fin(row['Inicio'], row['Días'], festivos_manuales), axis=1)
 
 # --- VISTA 1: TABLA EDITABLE ---
 st.subheader("📋 Registro de Actividades As-Built")
 
+# Desplegamos la tabla editable (sin permitir modificar Fecha Fin directamente, ya que se calcula)
 df_editado = st.data_editor(
     df[['Actividad', 'Responsable', 'Inicio', 'Días', 'Fecha Fin', 'Estado', 'Comentarios']],
     use_container_width=True,
@@ -76,8 +84,14 @@ df_editado = st.data_editor(
             options=["Pendiente", "En proceso", "Completado"],
             required=True
         ),
-        "Inicio": st.column_config.DateColumn("Inicio", format="YYYY-MM-DD")
+        "Inicio": st.column_config.DateColumn("Inicio", format="YYYY-MM-DD"),
+        "Fecha Fin": st.column_config.DateColumn("Fecha Fin (Calculada)", format="YYYY-MM-DD", disabled=True)
     }
+)
+
+# 🔥 RECALCULAR FECHA FIN EN TIEMPO REAL TRAS EDICIÓN DE ENTRADAS 🔥
+df_editado['Fecha Fin'] = df_editado.apply(
+    lambda row: calcular_fecha_fin(row['Inicio'], row['Días'], festivos_manuales), axis=1
 )
 
 # BOTÓN PARA GUARDAR CAMBIOS PERMANENTES EN LA BASE DE DATOS
@@ -85,7 +99,7 @@ col1, col2 = st.columns([1, 4])
 with col1:
     if st.button("💾 Guardar Cambios Permanentes"):
         try:
-            # Seleccionar columnas originales para guardar
+            # Seleccionar solo las columnas origen para guardar en Google Sheets
             df_para_guardar = df_editado[['Actividad', 'Responsable', 'Inicio', 'Días', 'Estado', 'Comentarios']]
             conn.update(spreadsheet=URL_GOOGLE_SHEETS, data=df_para_guardar)
             st.success("¡Datos guardados con éxito en la base de datos!")
