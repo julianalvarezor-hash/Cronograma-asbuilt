@@ -21,21 +21,16 @@ except Exception as e:
 
 def cargar_datos():
     df_raw = conn.read(ttl=0)
+    
+    # SALVAVIDAS: Si limpiaste el Excel manual y quedó vacío, esto reconstruye las columnas para evitar errores
+    columnas_esperadas = ['Actividad', 'Responsable', 'Inicio', 'Días', 'Estado', 'Comentarios']
+    for col in columnas_esperadas:
+        if col not in df_raw.columns:
+            df_raw[col] = None
+            
     df_raw.columns = df_raw.columns.str.strip()
-    
-    # Aseguramos que la columna Inicio sea formato fecha
-    if 'Inicio' in df_raw.columns:
-        df_raw['Inicio'] = pd.to_datetime(df_raw['Inicio'], errors='coerce').dt.date
-    
-    # Si la columna Fecha Fin no existe en tu Google Sheets, la creamos vacía temporalmente
-    if 'Fecha Fin' not in df_raw.columns:
-        df_raw['Fecha Fin'] = None
-    df_raw['Fecha Fin'] = pd.to_datetime(df_raw['Fecha Fin'], errors='coerce').dt.date
-    
-    # Mantenemos Días como dato informativo, pero ya no afecta el cálculo
-    if 'Días' in df_raw.columns:
-        df_raw['Días'] = pd.to_numeric(df_raw['Días'], errors='coerce').fillna(1).astype(int)
-        
+    df_raw['Inicio'] = pd.to_datetime(df_raw['Inicio'], errors='coerce').dt.date
+    df_raw['Días'] = pd.to_numeric(df_raw['Días'], errors='coerce').fillna(1).astype(int)
     return df_raw
 
 if "df_datos_base" not in st.session_state:
@@ -45,12 +40,63 @@ if "df_datos_base" not in st.session_state:
         st.error(f"Error al conectar con Google Sheets: {e}")
         st.stop()
 
+# --- SECCIÓN 1: SIDEBAR (LÍMITES DEL PROYECTO Y FESTIVOS) ---
+st.sidebar.header("⚙️ Configuración del Proyecto")
+
+# 1. DOS RECUADROS INDEPENDIENTES PARA LÍMITE DE PROYECTO
+st.sidebar.subheader("📅 Límites del Proyecto")
+fecha_inicio_proyecto = st.sidebar.date_input(
+    "Fecha Inicio del Proyecto:", 
+    value=datetime.date.today()
+)
+fecha_fin_proyecto = st.sidebar.date_input(
+    "Fecha Fin del Proyecto:", 
+    value=datetime.date.today() + datetime.timedelta(days=30)
+)
+
+st.sidebar.markdown("---")
+
+# 2. SELECTOR DE FESTIVOS RESTAURADO
+st.sidebar.subheader("🏖️ Días No Laborables")
+festivos_manuales = st.sidebar.multiselect(
+    "Selecciona los festivos que NO se trabajarán:",
+    options=[
+        datetime.date(2026, 8, 7),   
+        datetime.date(2026, 8, 17),  
+        datetime.date(2026, 10, 12), 
+        datetime.date(2026, 11, 2),  
+        datetime.date(2026, 11, 16), 
+        datetime.date(2026, 12, 8),  
+        datetime.date(2026, 12, 25)  
+    ],
+    default=[datetime.date(2026, 8, 7)]
+)
+
+def calcular_fecha_fin(fecha_inicio, dias_estimados, festivos_no_lab):
+    if pd.isna(fecha_inicio) or pd.isna(dias_estimados):
+        return fecha_inicio
+    
+    if isinstance(fecha_inicio, str):
+        fecha_inicio = pd.to_datetime(fecha_inicio).date()
+    elif isinstance(fecha_inicio, pd.Timestamp):
+        fecha_inicio = fecha_inicio.date()
+        
+    fecha_actual = fecha_inicio
+    dias_sumados = 0
+    while dias_sumados < int(dias_estimados):
+        fecha_actual += datetime.timedelta(days=1)
+        es_fin_de_semana = fecha_actual.weekday() >= 5
+        es_festivo_no_laboral = fecha_actual in festivos_no_lab
+        
+        if not es_fin_de_semana and not es_festivo_no_laboral:
+            dias_sumados += 1
+    return fecha_actual
+
 # --- VISTA 1: TABLA EDITABLE ---
 st.subheader("📋 Registro de Actividades As-Built")
 
-# Ahora la tabla incluye Fecha Fin para que la edites manualmente
 df_editado = st.data_editor(
-    st.session_state.df_datos_base[['Actividad', 'Responsable', 'Inicio', 'Fecha Fin', 'Días', 'Estado', 'Comentarios']],
+    st.session_state.df_datos_base[['Actividad', 'Responsable', 'Inicio', 'Días', 'Estado', 'Comentarios']],
     use_container_width=True,
     num_rows="dynamic",
     key="editor_tabla",
@@ -59,25 +105,42 @@ df_editado = st.data_editor(
             "Estado del Compromiso",
             options=["Pendiente", "En proceso", "Completado"]
         ),
-        "Inicio": st.column_config.DateColumn("Inicio", format="YYYY-MM-DD"),
-        "Fecha Fin": st.column_config.DateColumn("Fecha Fin (Manual)", format="YYYY-MM-DD"),
-        "Días": st.column_config.NumberColumn("Días (Informativo)", min_value=1, step=1)
+        "Inicio": st.column_config.DateColumn(
+            "Inicio", 
+            format="YYYY-MM-DD",
+            # RESTRICCIÓN: Solo permite seleccionar fechas entre el inicio y fin del proyecto
+            min_value=fecha_inicio_proyecto,
+            max_value=fecha_fin_proyecto
+        ),
+        "Días": st.column_config.NumberColumn("Días Duración", min_value=1, step=1)
     }
 )
+
+df_editado['Fecha Fin'] = df_editado.apply(
+    lambda row: calcular_fecha_fin(row['Inicio'], row['Días'], festivos_manuales), axis=1
+)
+
+with st.expander("👁️ Ver Fechas Finales Calculadas Dinámicamente", expanded=True):
+    st.dataframe(
+        df_editado[['Actividad', 'Inicio', 'Días', 'Fecha Fin', 'Estado']],
+        use_container_width=True,
+        hide_index=True
+    )
 
 # --- BOTÓN DE GUARDADO PERMANENTE ---
 col1, col2 = st.columns([1, 4])
 with col1:
     if st.button("💾 Guardar Cambios en la Nube"):
         try:
-            # Ahora guardamos también la Fecha Fin
-            df_para_guardar = df_editado[['Actividad', 'Responsable', 'Inicio', 'Fecha Fin', 'Días', 'Estado', 'Comentarios']].copy()
+            df_para_guardar = df_editado[['Actividad', 'Responsable', 'Inicio', 'Días', 'Estado', 'Comentarios']].copy()
             
             df_para_guardar['Estado'] = df_para_guardar['Estado'].fillna('Pendiente')
             df_para_guardar['Días'] = df_para_guardar['Días'].fillna(1)
             
             conn.update(data=df_para_guardar)
+            
             st.session_state.df_datos_base = df_para_guardar
+            
             st.success("¡Datos guardados con éxito en Google Sheets!")
         except Exception as err:
             st.error(f"Error al guardar los cambios: {err}")
@@ -87,64 +150,35 @@ st.markdown("---")
 # --- VISTA 2: GANTT / LÍNEA DE TIEMPO INTERACTIVA ---
 st.subheader("📅 Cronograma y Línea de Tiempo Interactiva")
 
-# Filtramos los datos válidos para el gráfico
 df_grafico = df_editado.dropna(subset=['Inicio', 'Fecha Fin']).copy()
 
-# Agregamos el selector de fechas al menú lateral (Sidebar)
-st.sidebar.markdown("---")
-st.sidebar.subheader("🔎 Filtro del Gantt")
-
 if not df_grafico.empty:
-    min_date = df_grafico['Inicio'].min()
-    max_date = df_grafico['Fecha Fin'].max()
+    fig = px.timeline(
+        df_grafico, 
+        x_start="Inicio", 
+        x_end="Fecha Fin", 
+        y="Actividad", 
+        color="Estado",
+        text="Responsable",
+        title="Línea de Tiempo por Actividad",
+        color_discrete_map={"Pendiente": "#7f8c8d", "En proceso": "#3498db", "Completado": "#2ecc71"}
+    )
+
+    fig.update_yaxes(autorange="reversed")
+    
+    # RESTRICCIÓN DEL GRÁFICO: Se fuerza al eje X a ajustarse estrictamente a las fechas del menú lateral
+    fig.update_layout(
+        xaxis_title="Fecha", 
+        yaxis_title="Actividades", 
+        height=450,
+        xaxis=dict(
+            range=[str(fecha_inicio_proyecto), str(fecha_fin_proyecto)]
+        )
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
 else:
-    min_date = datetime.date.today()
-    max_date = datetime.date.today() + datetime.timedelta(days=15)
-
-rango_fechas = st.sidebar.date_input(
-    "Selecciona el rango a visualizar:",
-    value=(min_date, max_date)
-)
-
-if not df_grafico.empty:
-    if isinstance(rango_fechas, tuple) and len(rango_fechas) == 2:
-        fecha_inicio_filtro, fecha_fin_filtro = rango_fechas
-        
-        df_grafico_filtrado = df_grafico[
-            (df_grafico['Fecha Fin'] >= fecha_inicio_filtro) & 
-            (df_grafico['Inicio'] <= fecha_fin_filtro)
-        ]
-        
-        if not df_grafico_filtrado.empty:
-            fig = px.timeline(
-                df_grafico_filtrado, 
-                x_start="Inicio", 
-                x_end="Fecha Fin", 
-                y="Actividad", 
-                color="Estado",
-                text="Responsable",
-                title="Línea de Tiempo por Actividad",
-                color_discrete_map={"Pendiente": "#7f8c8d", "En proceso": "#3498db", "Completado": "#2ecc71"}
-            )
-
-            fig.update_yaxes(autorange="reversed")
-            
-            fig.update_layout(
-                xaxis_title="Fecha", 
-                yaxis_title="Actividades", 
-                height=450,
-                xaxis=dict(
-                    range=[str(fecha_inicio_filtro), str(fecha_fin_filtro)]
-                )
-            )
-
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No hay actividades en el rango de fechas seleccionado.")
-    else:
-        st.info("Por favor, selecciona una fecha de inicio y una de fin en el menú lateral.")
-else:
-    st.info("Agrega fechas de inicio y fin a las actividades para visualizar el cronograma.")
+    st.info("Agrega fechas de inicio a las actividades para visualizar el cronograma.")
 
 # --- SECCIÓN 3: CONEXIÓN A SLACK ---
 st.markdown("---")
