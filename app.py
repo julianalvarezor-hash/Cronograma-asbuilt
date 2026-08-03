@@ -27,9 +27,10 @@ def cargar_datos():
     df_raw['Días'] = pd.to_numeric(df_raw['Días'], errors='coerce').fillna(1).astype(int)
     return df_raw
 
-if "df_datos" not in st.session_state:
+# Cargar los datos base en el estado de la sesión SOLO la primera vez
+if "df_datos_base" not in st.session_state:
     try:
-        st.session_state.df_datos = cargar_datos()
+        st.session_state.df_datos_base = cargar_datos()
     except Exception as e:
         st.error(f"Error al conectar con Google Sheets: {e}")
         st.stop()
@@ -70,15 +71,12 @@ def calcular_fecha_fin(fecha_inicio, dias_estimados, festivos_no_lab):
             dias_sumados += 1
     return fecha_actual
 
-st.session_state.df_datos['Fecha Fin'] = st.session_state.df_datos.apply(
-    lambda row: calcular_fecha_fin(row['Inicio'], row['Días'], festivos_manuales), axis=1
-)
-
 # --- VISTA 1: TABLA EDITABLE ---
 st.subheader("📋 Registro de Actividades As-Built")
 
+# Mostramos la tabla editable usando los datos base. Streamlit se encarga de guardar las ediciones internamente.
 df_editado = st.data_editor(
-    st.session_state.df_datos[['Actividad', 'Responsable', 'Inicio', 'Días', 'Estado', 'Comentarios']],
+    st.session_state.df_datos_base[['Actividad', 'Responsable', 'Inicio', 'Días', 'Estado', 'Comentarios']],
     use_container_width=True,
     num_rows="dynamic",
     key="editor_tabla",
@@ -93,10 +91,10 @@ df_editado = st.data_editor(
     }
 )
 
+# Calculamos la Fecha Fin SOLO para mostrarla en la tabla resumen y en el gráfico Gantt
 df_editado['Fecha Fin'] = df_editado.apply(
     lambda row: calcular_fecha_fin(row['Inicio'], row['Días'], festivos_manuales), axis=1
 )
-st.session_state.df_datos = df_editado
 
 with st.expander("👁️ Ver Fechas Finales Calculadas Dinámicamente", expanded=True):
     st.dataframe(
@@ -105,15 +103,21 @@ with st.expander("👁️ Ver Fechas Finales Calculadas Dinámicamente", expande
         hide_index=True
     )
 
-# BOTÓN DE GUARDADO PERMANENTE
+# --- BOTÓN DE GUARDADO PERMANENTE ---
 col1, col2 = st.columns([1, 4])
 with col1:
     if st.button("💾 Guardar Cambios en la Nube"):
         try:
+            # Preparamos los datos tal cual están en la tabla editada en pantalla
             df_para_guardar = df_editado[['Actividad', 'Responsable', 'Inicio', 'Días', 'Estado', 'Comentarios']]
+            
+            # 1. Guardamos en Google Sheets
             conn.update(data=df_para_guardar)
+            
+            # 2. Actualizamos la "base" de datos en la memoria para que coincida con lo guardado
+            st.session_state.df_datos_base = df_para_guardar
+            
             st.success("¡Datos guardados con éxito en Google Sheets!")
-            st.cache_data.clear()
         except Exception as err:
             st.error(f"Error al guardar los cambios: {err}")
 
