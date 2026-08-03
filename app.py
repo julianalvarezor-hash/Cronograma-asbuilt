@@ -10,7 +10,6 @@ st.title("🏗️ Control de Producción As-Built — Last Planner System")
 
 # --- CONEXIÓN A GOOGLE SHEETS Y LIMPIEZA DE SECRETS ---
 try:
-    # Si la private_key tiene saltos de línea sin escapar, los corregimos
     if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
         pk = st.secrets["connections"]["gsheets"].get("private_key", "")
         if "\\n" in pk:
@@ -27,7 +26,6 @@ def cargar_datos():
     df_raw['Días'] = pd.to_numeric(df_raw['Días'], errors='coerce').fillna(1).astype(int)
     return df_raw
 
-# Cargar los datos base en el estado de la sesión SOLO la primera vez
 if "df_datos_base" not in st.session_state:
     try:
         st.session_state.df_datos_base = cargar_datos()
@@ -40,13 +38,13 @@ st.sidebar.header("⚙️ Configuración de Calendario")
 festivos_manuales = st.sidebar.multiselect(
     "Selecciona los festivos que NO se trabajarán:",
     options=[
-        datetime.date(2026, 8, 7),   # Batalla de Boyacá
-        datetime.date(2026, 8, 17),  # La Asunción
-        datetime.date(2026, 10, 12), # Día de la Raza
-        datetime.date(2026, 11, 2),  # Todos los Santos
-        datetime.date(2026, 11, 16), # Independencia de Cartagena
-        datetime.date(2026, 12, 8),  # Inmaculada Concepción
-        datetime.date(2026, 12, 25)  # Navidad
+        datetime.date(2026, 8, 7),   
+        datetime.date(2026, 8, 17),  
+        datetime.date(2026, 10, 12), 
+        datetime.date(2026, 11, 2),  
+        datetime.date(2026, 11, 16), 
+        datetime.date(2026, 12, 8),  
+        datetime.date(2026, 12, 25)  
     ],
     default=[datetime.date(2026, 8, 7)]
 )
@@ -74,7 +72,6 @@ def calcular_fecha_fin(fecha_inicio, dias_estimados, festivos_no_lab):
 # --- VISTA 1: TABLA EDITABLE ---
 st.subheader("📋 Registro de Actividades As-Built")
 
-# Mostramos la tabla editable usando los datos base. Streamlit se encarga de guardar las ediciones internamente.
 df_editado = st.data_editor(
     st.session_state.df_datos_base[['Actividad', 'Responsable', 'Inicio', 'Días', 'Estado', 'Comentarios']],
     use_container_width=True,
@@ -83,15 +80,14 @@ df_editado = st.data_editor(
     column_config={
         "Estado": st.column_config.SelectboxColumn(
             "Estado del Compromiso",
-            options=["Pendiente", "En proceso", "Completado"],
-            required=True
+            options=["Pendiente", "En proceso", "Completado"]
+            # ELIMINAMOS required=True para que permita filas nuevas vacías
         ),
         "Inicio": st.column_config.DateColumn("Inicio", format="YYYY-MM-DD"),
         "Días": st.column_config.NumberColumn("Días Duración", min_value=1, step=1)
     }
 )
 
-# Calculamos la Fecha Fin SOLO para mostrarla en la tabla resumen y en el gráfico Gantt
 df_editado['Fecha Fin'] = df_editado.apply(
     lambda row: calcular_fecha_fin(row['Inicio'], row['Días'], festivos_manuales), axis=1
 )
@@ -108,13 +104,17 @@ col1, col2 = st.columns([1, 4])
 with col1:
     if st.button("💾 Guardar Cambios en la Nube"):
         try:
-            # Preparamos los datos tal cual están en la tabla editada en pantalla
-            df_para_guardar = df_editado[['Actividad', 'Responsable', 'Inicio', 'Días', 'Estado', 'Comentarios']]
+            # 1. Hacemos una copia de los datos de la tabla
+            df_para_guardar = df_editado[['Actividad', 'Responsable', 'Inicio', 'Días', 'Estado', 'Comentarios']].copy()
             
-            # 1. Guardamos en Google Sheets
+            # 2. AUTOCOMPLETAR: Si el usuario dejó celdas vacías al crear la fila, las llenamos por defecto
+            df_para_guardar['Estado'] = df_para_guardar['Estado'].fillna('Pendiente')
+            df_para_guardar['Días'] = df_para_guardar['Días'].fillna(1)
+            
+            # 3. Guardamos en Google Sheets
             conn.update(data=df_para_guardar)
             
-            # 2. Actualizamos la "base" de datos en la memoria para que coincida con lo guardado
+            # 4. Actualizamos la memoria
             st.session_state.df_datos_base = df_para_guardar
             
             st.success("¡Datos guardados con éxito en Google Sheets!")
@@ -126,21 +126,27 @@ st.markdown("---")
 # --- VISTA 2: GANTT / LÍNEA DE TIEMPO INTERACTIVA ---
 st.subheader("📅 Cronograma y Línea de Tiempo Interactiva")
 
-fig = px.timeline(
-    df_editado, 
-    x_start="Inicio", 
-    x_end="Fecha Fin", 
-    y="Actividad", 
-    color="Estado",
-    text="Responsable",
-    title="Línea de Tiempo por Actividad",
-    color_discrete_map={"Pendiente": "#7f8c8d", "En proceso": "#3498db", "Completado": "#2ecc71"}
-)
+# Filtramos filas que no tengan fecha de inicio para que el gráfico no se rompa
+df_grafico = df_editado.dropna(subset=['Inicio', 'Fecha Fin'])
 
-fig.update_yaxes(autorange="reversed")
-fig.update_layout(xaxis_title="Fecha", yaxis_title="Actividades", height=450)
+if not df_grafico.empty:
+    fig = px.timeline(
+        df_grafico, 
+        x_start="Inicio", 
+        x_end="Fecha Fin", 
+        y="Actividad", 
+        color="Estado",
+        text="Responsable",
+        title="Línea de Tiempo por Actividad",
+        color_discrete_map={"Pendiente": "#7f8c8d", "En proceso": "#3498db", "Completado": "#2ecc71"}
+    )
 
-st.plotly_chart(fig, use_container_width=True)
+    fig.update_yaxes(autorange="reversed")
+    fig.update_layout(xaxis_title="Fecha", yaxis_title="Actividades", height=450)
+
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.info("Agrega fechas de inicio a las actividades para visualizar el cronograma.")
 
 # --- SECCIÓN 3: CONEXIÓN A SLACK ---
 st.markdown("---")
