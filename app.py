@@ -22,15 +22,26 @@ except Exception as e:
 def cargar_datos():
     df_raw = conn.read(ttl=0)
     
-    # SALVAVIDAS: Si limpiaste el Excel manual y quedó vacío, esto reconstruye las columnas para evitar errores
     columnas_esperadas = ['Actividad', 'Responsable', 'Inicio', 'Días', 'Estado', 'Comentarios']
+    
+    # Si la hoja está completamente vacía, creamos la estructura base
+    if df_raw.empty or len(df_raw.columns) == 0:
+        df_raw = pd.DataFrame(columns=columnas_esperadas)
+        
     for col in columnas_esperadas:
         if col not in df_raw.columns:
-            df_raw[col] = None
+            df_raw[col] = ""  # Usamos cadena vacía, NO el valor None
             
     df_raw.columns = df_raw.columns.str.strip()
+    
+    # Limpiamos cualquier "None" fantasma que haya quedado guardado en tu Sheets
+    for col in ['Actividad', 'Responsable', 'Comentarios']:
+        df_raw[col] = df_raw[col].fillna("")
+        df_raw[col] = df_raw[col].astype(str).replace("None", "").replace("nan", "")
+
     df_raw['Inicio'] = pd.to_datetime(df_raw['Inicio'], errors='coerce').dt.date
     df_raw['Días'] = pd.to_numeric(df_raw['Días'], errors='coerce').fillna(1).astype(int)
+    
     return df_raw
 
 if "df_datos_base" not in st.session_state:
@@ -56,7 +67,7 @@ fecha_fin_proyecto = st.sidebar.date_input(
 
 st.sidebar.markdown("---")
 
-# 2. SELECTOR DE FESTIVOS RESTAURADO
+# 2. SELECTOR DE FESTIVOS
 st.sidebar.subheader("🏖️ Días No Laborables")
 festivos_manuales = st.sidebar.multiselect(
     "Selecciona los festivos que NO se trabajarán:",
@@ -101,6 +112,10 @@ df_editado = st.data_editor(
     num_rows="dynamic",
     key="editor_tabla",
     column_config={
+        # Configuramos explícitamente las columnas de texto para que sean de escritura libre
+        "Actividad": st.column_config.TextColumn("Actividad"),
+        "Responsable": st.column_config.TextColumn("Responsable"),
+        "Comentarios": st.column_config.TextColumn("Comentarios"),
         "Estado": st.column_config.SelectboxColumn(
             "Estado del Compromiso",
             options=["Pendiente", "En proceso", "Completado"]
@@ -108,7 +123,6 @@ df_editado = st.data_editor(
         "Inicio": st.column_config.DateColumn(
             "Inicio", 
             format="YYYY-MM-DD",
-            # RESTRICCIÓN: Solo permite seleccionar fechas entre el inicio y fin del proyecto
             min_value=fecha_inicio_proyecto,
             max_value=fecha_fin_proyecto
         ),
@@ -151,6 +165,8 @@ st.markdown("---")
 st.subheader("📅 Cronograma y Línea de Tiempo Interactiva")
 
 df_grafico = df_editado.dropna(subset=['Inicio', 'Fecha Fin']).copy()
+# Filtrar aquellas filas que no tengan un texto de actividad válido para que Plotly no falle
+df_grafico = df_grafico[df_grafico['Actividad'].str.strip() != ""]
 
 if not df_grafico.empty:
     fig = px.timeline(
@@ -166,7 +182,7 @@ if not df_grafico.empty:
 
     fig.update_yaxes(autorange="reversed")
     
-    # RESTRICCIÓN DEL GRÁFICO: Se fuerza al eje X a ajustarse estrictamente a las fechas del menú lateral
+    # Restricción del gráfico a las fechas del menú lateral
     fig.update_layout(
         xaxis_title="Fecha", 
         yaxis_title="Actividades", 
@@ -178,7 +194,7 @@ if not df_grafico.empty:
 
     st.plotly_chart(fig, use_container_width=True)
 else:
-    st.info("Agrega fechas de inicio a las actividades para visualizar el cronograma.")
+    st.info("Agrega el nombre y fechas de inicio a las actividades para visualizar el cronograma.")
 
 # --- SECCIÓN 3: CONEXIÓN A SLACK ---
 st.markdown("---")
