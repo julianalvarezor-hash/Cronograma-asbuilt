@@ -8,7 +8,7 @@ from streamlit_gsheets import GSheetsConnection
 st.set_page_config(page_title="Control de Producción As-Built (LPS)", layout="wide")
 st.title("🏗️ Control de Producción As-Built — Last Planner System")
 
-# --- CONEXIÓN A GOOGLE SHEETS Y LIMPIEZA DE SECRETS ---
+# --- CONEXIÓN A GOOGLE SHEETS ---
 try:
     if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
         pk = st.secrets["connections"]["gsheets"].get("private_key", "")
@@ -19,22 +19,25 @@ try:
 except Exception as e:
     st.error(f"Error en configuración de Secrets: {e}")
 
+# --- CARGA DE DATOS (ACTIVIDADES Y CONFIGURACIÓN) ---
 def cargar_datos():
-    df_raw = conn.read(ttl=0)
-    
+    # 1. Cargar tabla de Actividades
+    try:
+        df_raw = conn.read(worksheet="Actividades", ttl=0)
+    except Exception:
+        df_raw = pd.DataFrame()
+        
     columnas_esperadas = ['Actividad', 'Responsable', 'Inicio', 'Días', 'Estado', 'Comentarios']
     
-    # Si la hoja está completamente vacía, creamos la estructura base
     if df_raw.empty or len(df_raw.columns) == 0:
         df_raw = pd.DataFrame(columns=columnas_esperadas)
         
     for col in columnas_esperadas:
         if col not in df_raw.columns:
-            df_raw[col] = ""  # Usamos cadena vacía, NO el valor None
+            df_raw[col] = ""
             
     df_raw.columns = df_raw.columns.str.strip()
     
-    # Limpiamos cualquier "None" fantasma que haya quedado guardado en tu Sheets
     for col in ['Actividad', 'Responsable', 'Comentarios']:
         df_raw[col] = df_raw[col].fillna("")
         df_raw[col] = df_raw[col].astype(str).replace("None", "").replace("nan", "")
@@ -42,45 +45,66 @@ def cargar_datos():
     df_raw['Inicio'] = pd.to_datetime(df_raw['Inicio'], errors='coerce').dt.date
     df_raw['Días'] = pd.to_numeric(df_raw['Días'], errors='coerce').fillna(1).astype(int)
     
-    return df_raw
-
-if "df_datos_base" not in st.session_state:
+    # 2. Cargar parámetros de Configuración
     try:
-        st.session_state.df_datos_base = cargar_datos()
+        df_config = conn.read(worksheet="Configuracion", ttl=0)
+        df_config = df_config.set_index("Parametro")
+        
+        f_inicio = pd.to_datetime(df_config.loc["Fecha Inicio", "Valor"]).date()
+        f_fin = pd.to_datetime(df_config.loc["Fecha Fin", "Valor"]).date()
+        
+        festivos_str = str(df_config.loc["Festivos", "Valor"])
+        if festivos_str and festivos_str.lower() != "nan":
+            festivos_lista = [pd.to_datetime(d.strip()).date() for d in festivos_str.split(",") if d.strip()]
+        else:
+            festivos_lista = []
+    except Exception:
+        # Valores por defecto si la pestaña está vacía la primera vez
+        f_inicio = datetime.date.today()
+        f_fin = datetime.date.today() + datetime.timedelta(days=30)
+        festivos_lista = [datetime.date(2026, 8, 7)]
+
+    return df_raw, f_inicio, f_fin, festivos_lista
+
+if "datos_cargados" not in st.session_state:
+    try:
+        df_base, f_in, f_out, festivos_guardados = cargar_datos()
+        st.session_state.df_datos_base = df_base
+        st.session_state.fecha_inicio_def = f_in
+        st.session_state.fecha_fin_def = f_out
+        st.session_state.festivos_def = festivos_guardados
+        st.session_state.datos_cargados = True
     except Exception as e:
         st.error(f"Error al conectar con Google Sheets: {e}")
         st.stop()
 
-# --- SECCIÓN 1: SIDEBAR (LÍMITES DEL PROYECTO Y FESTIVOS) ---
+# --- SECCIÓN 1: SIDEBAR (LÍMITES Y FESTIVOS) ---
 st.sidebar.header("⚙️ Configuración del Proyecto")
 
-# 1. DOS RECUADROS INDEPENDIENTES PARA LÍMITE DE PROYECTO
 st.sidebar.subheader("📅 Límites del Proyecto")
 fecha_inicio_proyecto = st.sidebar.date_input(
     "Fecha Inicio del Proyecto:", 
-    value=datetime.date.today()
+    value=st.session_state.fecha_inicio_def
 )
 fecha_fin_proyecto = st.sidebar.date_input(
     "Fecha Fin del Proyecto:", 
-    value=datetime.date.today() + datetime.timedelta(days=30)
+    value=st.session_state.fecha_fin_def
 )
 
 st.sidebar.markdown("---")
-
-# 2. SELECTOR DE FESTIVOS
 st.sidebar.subheader("🏖️ Días No Laborables")
+
+# Opciones por defecto + los que ya tenías guardados
+opciones_festivos = list(set(st.session_state.festivos_def + [
+    datetime.date(2026, 8, 7), datetime.date(2026, 8, 17), 
+    datetime.date(2026, 10, 12), datetime.date(2026, 11, 2), 
+    datetime.date(2026, 11, 16), datetime.date(2026, 12, 8), datetime.date(2026, 12, 25)
+]))
+
 festivos_manuales = st.sidebar.multiselect(
     "Selecciona los festivos que NO se trabajarán:",
-    options=[
-        datetime.date(2026, 8, 7),   
-        datetime.date(2026, 8, 17),  
-        datetime.date(2026, 10, 12), 
-        datetime.date(2026, 11, 2),  
-        datetime.date(2026, 11, 16), 
-        datetime.date(2026, 12, 8),  
-        datetime.date(2026, 12, 25)  
-    ],
-    default=[datetime.date(2026, 8, 7)]
+    options=opciones_festivos,
+    default=st.session_state.festivos_def
 )
 
 def calcular_fecha_fin(fecha_inicio, dias_estimados, festivos_no_lab):
@@ -112,7 +136,6 @@ df_editado = st.data_editor(
     num_rows="dynamic",
     key="editor_tabla",
     column_config={
-        # Configuramos explícitamente las columnas de texto para que sean de escritura libre
         "Actividad": st.column_config.TextColumn("Actividad"),
         "Responsable": st.column_config.TextColumn("Responsable"),
         "Comentarios": st.column_config.TextColumn("Comentarios"),
@@ -146,16 +169,27 @@ col1, col2 = st.columns([1, 4])
 with col1:
     if st.button("💾 Guardar Cambios en la Nube"):
         try:
+            # 1. Guardar tabla de Actividades
             df_para_guardar = df_editado[['Actividad', 'Responsable', 'Inicio', 'Días', 'Estado', 'Comentarios']].copy()
-            
             df_para_guardar['Estado'] = df_para_guardar['Estado'].fillna('Pendiente')
             df_para_guardar['Días'] = df_para_guardar['Días'].fillna(1)
+            conn.update(worksheet="Actividades", data=df_para_guardar)
             
-            conn.update(data=df_para_guardar)
+            # 2. Guardar parámetros de Configuración
+            festivos_str = ", ".join([f.strftime("%Y-%m-%d") for f in festivos_manuales])
+            df_config_save = pd.DataFrame({
+                "Parametro": ["Fecha Inicio", "Fecha Fin", "Festivos"],
+                "Valor": [fecha_inicio_proyecto.strftime("%Y-%m-%d"), fecha_fin_proyecto.strftime("%Y-%m-%d"), festivos_str]
+            })
+            conn.update(worksheet="Configuracion", data=df_config_save)
             
+            # 3. Actualizar memoria de la sesión
             st.session_state.df_datos_base = df_para_guardar
+            st.session_state.fecha_inicio_def = fecha_inicio_proyecto
+            st.session_state.fecha_fin_def = fecha_fin_proyecto
+            st.session_state.festivos_def = festivos_manuales
             
-            st.success("¡Datos guardados con éxito en Google Sheets!")
+            st.success("¡Datos y configuración guardados con éxito en Google Sheets!")
         except Exception as err:
             st.error(f"Error al guardar los cambios: {err}")
 
@@ -165,7 +199,6 @@ st.markdown("---")
 st.subheader("📅 Cronograma y Línea de Tiempo Interactiva")
 
 df_grafico = df_editado.dropna(subset=['Inicio', 'Fecha Fin']).copy()
-# Filtrar aquellas filas que no tengan un texto de actividad válido para que Plotly no falle
 df_grafico = df_grafico[df_grafico['Actividad'].str.strip() != ""]
 
 if not df_grafico.empty:
@@ -182,7 +215,6 @@ if not df_grafico.empty:
 
     fig.update_yaxes(autorange="reversed")
     
-    # Restricción del gráfico a las fechas del menú lateral
     fig.update_layout(
         xaxis_title="Fecha", 
         yaxis_title="Actividades", 
